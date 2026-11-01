@@ -1,0 +1,13 @@
+{
+  "search.exclude": {
+    "**/node_modules": true,
+    "**/bower_components": true,
+    "**/.sf": true,
+    "**/.sfdx": true
+<<<<<<< HEAD
+  }
+=======
+  },
+  "xml.preferences.showSchemaDocumentationType": "none"
+>>>>>>> 40878847a6c5dcde4ecc996a6b5fdee5bc19d951
+}
