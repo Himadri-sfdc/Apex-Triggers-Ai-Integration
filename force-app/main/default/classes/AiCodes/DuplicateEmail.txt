@@ -1,0 +1,209 @@
+1. Apex Class: PreventEmailDuplicationOfContact.cls
+
+public with sharing class PreventEmailDuplicationOfContact {
+
+    private static final String DUPLICATE_ERROR = 'This email address is already used by another Contact.';
+
+    /**
+     * Prevents two Contacts from sharing the same Email (case-insensitive).
+     * Must be called from a BEFORE INSERT / BEFORE UPDATE trigger context.
+     */
+    public static void preventDuplicateEmail(List<Contact> newContacts, Map<Id, Contact> oldContactMap) {
+        if (newContacts == null || newContacts.isEmpty()) {
+            return;
+        }
+
+        // 1. Collect the normalized emails that actually need checking
+        Set<String> emailsToCheck = new Set<String>();
+        for (Contact con : newContacts) {
+            if (!shouldValidate(con, oldContactMap)) {
+                continue;
+            }
+            emailsToCheck.add(normalize(con.Email));
+        }
+
+        if (emailsToCheck.isEmpty()) {
+            return;
+        }
+
+        // 2. Build map of existing Contacts in the DB with those emails
+        //    Key = normalized email, Value = Contact Id
+        Map<String, Id> existingEmailToContactId = new Map<String, Id>();
+        for (Contact existing : [
+            SELECT Id, Email
+            FROM Contact
+            WHERE Email IN :emailsToCheck
+            WITH SECURITY_ENFORCED
+        ]) {
+            existingEmailToContactId.put(normalize(existing.Email), existing.Id);
+        }
+
+        // 3. Track emails within the current batch (catches duplicates inside the same DML)
+        Map<String, Contact> emailsInBatch = new Map<String, Contact>();
+
+        // 4. Validate each record
+        for (Contact con : newContacts) {
+            if (!shouldValidate(con, oldContactMap)) {
+                continue;
+            }
+
+            String key = normalize(con.Email);
+
+            // Duplicate against an existing record in the database
+            Id existingId = existingEmailToContactId.get(key);
+            if (existingId != null && existingId != con.Id) {
+                con.Email.addError(DUPLICATE_ERROR);
+                continue;
+            }
+
+            // Duplicate against another record in the same batch
+            Contact firstInBatch = emailsInBatch.get(key);
+            if (firstInBatch != null) {
+                con.Email.addError(DUPLICATE_ERROR);
+                continue;
+            }
+
+            emailsInBatch.put(key, con);
+        }
+    }
+
+    /* ---------- Helpers ---------- */
+
+    /**
+     * Validate only when the email is non-blank AND
+     * (it is an insert OR the email actually changed on update).
+     */
+    private static Boolean shouldValidate(Contact con, Map<Id, Contact> oldContactMap) {
+        if (String.isBlank(con.Email)) {
+            return false;
+        }
+        if (oldContactMap == null || con.Id == null) {
+            return true; // insert
+        }
+        Contact oldCon = oldContactMap.get(con.Id);
+        return oldCon == null || normalize(oldCon.Email) != normalize(con.Email);
+    }
+
+    /**
+     * Normalize email for comparison: trim + lowercase.
+     */
+    private static String normalize(String email) {
+        return String.isBlank(email) ? null : email.trim().toLowerCase();
+    }
+
+2. Trigger: ContactTrigger.trigger
+
+trigger ContactTrigger on Contact (before insert, before update) {
+    PreventEmailDuplicationOfContact.preventDuplicateEmail(Trigger.new, Trigger.oldMap);
+}
+
+3. Test Class: PreventEmailDuplicationOfContactTest.cls
+
+@IsTest
+private class PreventEmailDuplicationOfContactTest {
+
+    @TestSetup
+    static void setup() {
+        Account acc = new Account(Name = 'Test Account');
+        insert acc;
+
+        insert new Contact(LastName = 'Existing', AccountId = acc.Id, Email = 'john@test.com');
+    }
+
+    @IsTest
+    static void insertWithNewEmail_shouldSucceed() {
+        Account acc = [SELECT Id FROM Account LIMIT 1];
+        Test.startTest();
+        Database.SaveResult sr = Database.insert(
+            new Contact(LastName = 'New', AccountId = acc.Id, Email = 'new@test.com'),
+            false
+        );
+        Test.stopTest();
+
+        System.assert(sr.isSuccess(), 'Insert with unique email should succeed');
+    }
+
+    @IsTest
+    static void insertWithDuplicateEmail_shouldFail() {
+        Account acc = [SELECT Id FROM Account LIMIT 1];
+        Test.startTest();
+        Database.SaveResult sr = Database.insert(
+            new Contact(LastName = 'Dup', AccountId = acc.Id, Email = 'john@test.com'),
+            false
+        );
+        Test.stopTest();
+
+        System.assert(!sr.isSuccess(), 'Insert with duplicate email should fail');
+        System.assert(sr.getErrors()[0].getMessage().contains('already used'));
+    }
+
+    @IsTest
+    static void insertWithDuplicateEmailDifferentCase_shouldFail() {
+        Account acc = [SELECT Id FROM Account LIMIT 1];
+        Test.startTest();
+        Database.SaveResult sr = Database.insert(
+            new Contact(LastName = 'Dup', AccountId = acc.Id, Email = 'JOHN@TEST.COM'),
+            false
+        );
+        Test.stopTest();
+
+        System.assert(!sr.isSuccess(), 'Case-insensitive duplicate should fail');
+    }
+
+    @IsTest
+    static void bulkInsertSameBatchDuplicate_shouldFailOne() {
+        Account acc = [SELECT Id FROM Account LIMIT 1];
+        List<Contact> cons = new List<Contact>{
+            new Contact(LastName = 'A', AccountId = acc.Id, Email = 'same@test.com'),
+            new Contact(LastName = 'B', AccountId = acc.Id, Email = 'same@test.com')
+        };
+
+        Test.startTest();
+        List<Database.SaveResult> results = Database.insert(cons, false);
+        Test.stopTest();
+
+        System.assert(results[0].isSuccess(), 'First record should succeed');
+        System.assert(!results[1].isSuccess(), 'Second record should fail');
+    }
+
+    @IsTest
+    static void updateKeepingOwnEmail_shouldSucceed() {
+        Contact con = [SELECT Id, LastName FROM Contact WHERE Email = 'john@test.com' LIMIT 1];
+        con.LastName = 'Updated';
+        con.Email = 'john@test.com';
+
+        Test.startTest();
+        Database.SaveResult sr = Database.update(con, false);
+        Test.stopTest();
+
+        System.assert(sr.isSuccess(), 'Updating own record with same email should succeed');
+    }
+
+    @IsTest
+    static void blankEmail_shouldSucceed() {
+        Account acc = [SELECT Id FROM Account LIMIT 1];
+        Test.startTest();
+        Database.SaveResult sr = Database.insert(
+            new Contact(LastName = 'NoEmail', AccountId = acc.Id),
+            false
+        );
+        Test.stopTest();
+
+        System.assert(sr.isSuccess(), 'Blank email should not be validated');
+    }
+}
+
+4.Here is a short explanation
+
+This Apex class prevents duplicate Contact emails in Salesforce. It runs on before insert and before update triggers, so the error is shown before the record is saved. It first collects the emails that need checking, skipping blank emails and unchanged emails on update. It then runs a single SOQL query with an IN filter to find existing Contacts with those emails, which keeps the code bulk-safe. Emails are normalized with trim and lowercase so the comparison is case-insensitive. It also catches duplicates within the same batch using a map. Finally, it adds an error to the Email field of any duplicate record, and the record is not saved.
+
+How to answer in interviews:
+
+Use a simple structure: what it does, how it works, and why it is designed this way.
+
+Start with the purpose (10 seconds): “This class prevents duplicate Contact emails. It’s called from a before insert and before update trigger so the user gets an error before saving.”
+Explain the key design decisions: Mention bulk safety (one SOQL outside the loop), case-insensitive matching, handling duplicates within the same batch, and skipping unchanged emails on update to avoid unnecessary queries.
+Mention governor limits and security: “I used a single query to stay within SOQL limits and WITH SECURITY_ENFORCED plus with sharing to respect user permissions.”
+Show testing awareness: “I wrote tests for insert, update, duplicate, different case, bulk same-batch duplicates, and blank emails, to reach high coverage.”
+Be honest about limitations: For example, “Email matching is exact after normalization, so it won’t catch aliases like john+1@gmail.com. A race condition is also possible when two transactions save at the same time, which a unique field or Duplicate Rules would handle better.”
+Close with an improvement: “If I had more time, I would consider using Salesforce Duplicate Rules alongside this, or making the check reusable for Lead and other objects.”
