@@ -1,0 +1,95 @@
+1. Handler class
+----------------
+
+public with sharing class AccountContactDeleteHandler {
+
+    public static void preventDeleteWithContacts(List<Account> accounts) {
+        if (accounts == null || accounts.isEmpty()) {
+            return;
+        }
+
+        Set<Id> accountIds = new Set<Id>();
+        for (Account acc : accounts) {
+            accountIds.add(acc.Id);
+        }
+
+        Set<Id> accountsWithContacts = new Set<Id>();
+        for (AggregateResult ar : [
+            SELECT AccountId accId
+            FROM Contact
+            WHERE AccountId IN :accountIds
+            GROUP BY AccountId
+        ]) {
+            accountsWithContacts.add((Id) ar.get('accId'));
+        }
+
+        for (Account acc : accounts) {
+            if (accountsWithContacts.contains(acc.Id)) {
+                acc.addError(Label.Account_Delete_Has_Contacts_Error);
+            }
+        }
+    }
+}
+
+2. Trigger
+----------
+
+trigger AccountTrigger on Account (before delete) {
+    AccountContactDeleteHandler.preventDeleteWithContacts(Trigger.old);
+}
+
+3.Test class
+------------
+
+@IsTest
+private class AccountContactDeleteHandlerTest {
+
+    @IsTest
+    static void deleteAccountWithContactsIsBlocked() {
+        Account acc = new Account(Name = 'Test Account');
+        insert acc;
+        insert new Contact(LastName = 'Test Contact', AccountId = acc.Id);
+
+        Test.startTest();
+        Database.DeleteResult result = Database.delete(acc, false);
+        Test.stopTest();
+
+        System.assertEquals(false, result.isSuccess(), 'Delete should fail when Contacts exist');
+        System.assertEquals(1, result.getErrors().size());
+    }
+
+    @IsTest
+    static void deleteAccountWithoutContactsIsAllowed() {
+        Account acc = new Account(Name = 'Empty Account');
+        insert acc;
+
+        Test.startTest();
+        Database.DeleteResult result = Database.delete(acc, false);
+        Test.stopTest();
+
+        System.assertEquals(true, result.isSuccess(), 'Delete should succeed when no Contacts exist');
+    }
+
+    @IsTest
+    static void bulkDeleteMixedAccountsOnlyBlocksThoseWithContacts() {
+        List<Account> accounts = new List<Account>{
+            new Account(Name = 'With Contact 1'),
+            new Account(Name = 'With Contact 2'),
+            new Account(Name = 'No Contact')
+        };
+        insert accounts;
+
+        insert new List<Contact>{
+            new Contact(LastName = 'C1', AccountId = accounts[0].Id),
+            new Contact(LastName = 'C2', AccountId = accounts[1].Id)
+        };
+
+        Test.startTest();
+        List<Database.DeleteResult> results = Database.delete(accounts, false);
+        Test.stopTest();
+
+        System.assertEquals(false, results[0].isSuccess());
+        System.assertEquals(false, results[1].isSuccess());
+        System.assertEquals(true, results[2].isSuccess());
+    }
+}
