@@ -201,7 +201,7 @@ How to answer in interviews:
 
 Use a simple structure: what it does, how it works, and why it is designed this way.
 
-Start with the purpose (10 seconds): “This class prevents duplicate Contact emails. It’s called from a before insert and before update trigger so the user gets an error before saving.”
+Start with the purpose (15 seconds): “This class prevents duplicate Contact emails. It’s called from a before insert and before update trigger so the user gets an error before saving.”
 Explain the key design decisions: Mention bulk safety (one SOQL outside the loop), case-insensitive matching, handling duplicates within the same batch, and skipping unchanged emails on update to avoid unnecessary queries.
 Mention governor limits and security: “I used a single query to stay within SOQL limits and WITH SECURITY_ENFORCED plus with sharing to respect user permissions.”
 Show testing awareness: “I wrote tests for insert, update, duplicate, different case, bulk same-batch duplicates, and blank emails, to reach high coverage.”
