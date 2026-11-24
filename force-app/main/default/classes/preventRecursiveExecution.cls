@@ -29,3 +29,6 @@ public with sharing class preventRecursiveExecution {
 
 // when an Account is updated and related Contact records are updated through Apex, those Contact updates can fire the Contact trigger again. We can use recursion control to prevent unwanted repeated execution.
 
+
+
+
